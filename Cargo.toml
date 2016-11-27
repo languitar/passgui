@@ -1,0 +1,16 @@
+[package]
+
+name = "passgui"
+version = "0.0.1"
+authors = [ "Johannes Wienke <languitar@semipol.de>" ]
+
+[dependencies.gtk]
+version = "0.1.0"
+features = ["v3_10"]
+
+[dependencies]
+walkdir = "1"
+gdk = "0.5.0"
+
+[[bin]]
+name = "passgui"
