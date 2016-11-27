@@ -5,14 +5,15 @@ version = "0.0.1"
 authors = [ "Johannes Wienke <languitar@semipol.de>" ]
 
 [dependencies.gtk]
-version = "0.1.0"
+version = "^0"
 features = ["v3_10"]
 
 [dependencies]
-walkdir = "1"
-gdk = "0.5.0"
-log = "0.3.6"
-log4rs = "0.5.2"
+walkdir = "^0"
+gdk = "^0"
+glib = "^0"
+log = "^0"
+log4rs = "^0"
 
 [[bin]]
 name = "passgui"

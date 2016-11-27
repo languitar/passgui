@@ -2,12 +2,14 @@
 extern crate log;
 extern crate log4rs;
 extern crate gdk;
+extern crate glib;
 extern crate gtk;
 extern crate walkdir;
 
 use std::env;
 use std::ffi;
 use std::str;
+use std::thread;
 
 use std::process::Command;
 use std::string::String;
@@ -198,21 +200,30 @@ fn main() {
         if choices.contains(&current_text) {
             debug!("Entered text is a valid password store entry, continuing");
 
-            window.hide();
+            entry.set_sensitive(false);
 
             // request password
-            let password = get_password(&current_text);
+            let next_app = previous_app.clone();
+            thread::spawn(move || {
+                let password = get_password(&current_text);
 
-            // restore focus for previous app
-            focus_app(&previous_app);
+                // restore focus for previous app
+                // window.hide();
+                focus_app(&next_app);
 
-            // auto type
-            auto_type(&password);
+                // auto type
+                auto_type(&password);
 
-            // end this process
-            gtk::main_quit();
+                glib::idle_add(exit);
+            });
+
         }
     });
 
     gtk::main();
+}
+
+fn exit() -> glib::Continue {
+    gtk::main_quit();
+    glib::Continue(false)
 }
