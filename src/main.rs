@@ -6,6 +6,7 @@ extern crate glib;
 extern crate gtk;
 extern crate walkdir;
 
+use std::cell::RefCell;
 use std::env;
 use std::ffi;
 use std::str;
@@ -18,7 +19,8 @@ use std::vec::Vec;
 use walkdir::{DirEntry, WalkDir, WalkDirIterator};
 
 use gtk::prelude::*;
-use gtk::{Entry, EntryCompletion, ListStore, Type, Window, WindowPosition, WindowType};
+use gtk::{ButtonsType, DialogFlags, Entry, EntryCompletion, ListStore, MessageType,
+          MessageDialog, Type, Window, WindowPosition, WindowType};
 
 use log::LogLevelFilter;
 use log4rs::append::console::ConsoleAppender;
@@ -60,9 +62,13 @@ fn get_choices() -> Vec<String> {
         let path = entry.path();
 
         // get the entry relative to the store root
-        let relative = path.strip_prefix(&store_dir).unwrap();
+        let relative = path.strip_prefix(&store_dir)
+                           .expect("A contained file in the password store must always \
+                                    be relative to it");
         // strip the gpg extension
+        // first, get the folder containg the gpg file or use an empty folder if it is in the base
         let folder = relative.parent().unwrap_or(std::path::Path::new(""));
+        // then join the filename without the eztension to this folder to compose the common name
         let name = folder.join(relative.file_stem().expect(
                 "Entry must have a stem because we only allow files with extension here"));
 
@@ -83,54 +89,74 @@ fn choices_to_model(choices: &Vec<String>) -> ListStore {
     model
 }
 
-fn get_password(entry: &String) -> String {
+fn get_password(entry: &String) -> Result<String, String> {
     debug!("Trying to get password for entry '{:?}'", entry);
-    let output = Command::new("pass")
-                         .arg("show")
-                         .arg(entry)
-                         .output()
-                         .expect("Unable to get the password from pass");
+    let output = try!(Command::new("pass")
+                              .arg("show")
+                              .arg(entry)
+                              .output()
+                              .map_err(|e| format!("Unable to call pass: {:?}", e.to_string())));
     if !output.status.success() {
-        // TODO check that this does not leak passwords to log files
-        error!("Could not get the password:\n stdout:\n{:?}\n\nstderr:\n{:?}",
-               std::str::from_utf8(&output.stdout),
-               std::str::from_utf8(&output.stderr));
-        panic!("pass did not return the password");
+        return Err(format!("pass indicated an error:\n stdout:\n{:?}\n\nstderr:\n{:?}",
+                           std::str::from_utf8(&output.stdout),
+                           std::str::from_utf8(&output.stderr)));
     }
 
-    let out = std::str::from_utf8(&output.stdout)
-                       .expect("UTF-8 conversion error for entry").to_string();
-    let password = out.lines().next().expect("pass entry did not contain any lines").to_string();
+    let out = try!(std::str::from_utf8(&output.stdout)
+                            .map_err(|e| format!("Unable to decode reply from pass: {:?}",
+                                                 e.to_string()))
+                            .map(|s| s.to_string()));
+    let password = try!(out.lines().next().ok_or("pass output did not contain any lines")
+                                          .map(|l| l.to_string()));
     debug!("Received password of length {:?}", password.len());
 
-    password
+    Ok(password)
 }
 
-fn auto_type(text: &String) {
-    debug!("Auto-typeing text of length {:?}",
+fn auto_type(text: &String) -> Result<(), String> {
+    debug!("Auto-typing text of length {:?}",
            text.len());
-    Command::new("cliclick")
-            .arg("t:".to_string() + text)
-            .status().expect("Could not type");
+    let status = try!(Command::new("cliclick")
+                              .arg("t:".to_string() + text)
+                              .status()
+                              .map_err(|e| format!("Could not launch clicick: {:?}:",
+                                                   e.to_string())));
+    if status.success() {
+        Ok(())
+    } else {
+        Err("clicick was not successful".to_string())
+    }
 }
 
-fn get_previous_app() -> String {
+fn get_previous_app() -> Result<String, String> {
     debug!("Receiving previously focused app from system");
-    let output = Command::new("osascript")
-                         .arg("-e")
-                         .arg("tell application \"System Events\" to set frontmostApplicationName to name of 1st process whose frontmost is true")
-                         .output()
-                         .expect("Could not get previous app");
-    std::str::from_utf8(&output.stdout)
-             .expect("UTF-8 conversion error for entry").to_string().trim().to_string()
+    let output = try!(Command::new("osascript")
+                              .arg("-e")
+                              .arg("tell application \"System Events\" \
+                                    to set frontmostApplicationName \
+                                    to name of 1st process whose frontmost is true")
+                              .output()
+                              .map_err(|e| format!("Could not call osascript: {:?}",
+                                                   e.to_string())));
+    match std::str::from_utf8(&output.stdout) {
+        Ok(s)  => Ok(s.to_string().trim().to_string()),
+        Err(_) => Err("UTF-8 conversion error for entry".to_string())
+    }
 }
 
-fn focus_app(name: &String) {
+fn focus_app(name: &String) -> Result<(), String> {
     debug!("Focusing app {:?}", name);
-    Command::new("osascript")
-            .arg("-e")
-            .arg(format!("tell application \"{}\" to activate", name))
-            .status().expect("Could not activate recent app");
+    let status = try!(Command::new("osascript")
+                              .arg("-e")
+                              .arg(format!("tell application \"{}\" to activate", name))
+                              .status()
+                              .map_err(|e| format!("Could not call osascript: {:?}",
+                                                   e.to_string())));
+    if status.success() {
+        Ok(())
+    } else {
+        Err("osascript was not successful".to_string())
+    }
 }
 
 fn configure_logging() {
@@ -146,7 +172,7 @@ fn main() {
     configure_logging();
 
     // get the currently active app to restore focus in case we want to type
-    let previous_app = get_previous_app();
+    let previous_app = get_previous_app().expect("Unable to function without previous app");
     debug!("Determied previous app to be {:?}", previous_app);
 
     gtk::init().expect("Failed to initialize GTK");
@@ -192,12 +218,23 @@ fn main() {
     });
 
     // Execute on enter
-    // hack around the nasty ownership issues here by moving the search entry into the clouse.
-    search_entry.connect_activate(move |entry| {
-        let current_text = entry.get_text().unwrap_or(String::new());
-        debug!("Form activated with text {:?}", current_text);
+    // hack around the nasty ownership issues with global state
+    search_entry.connect_activate(|_| {
+        GLOBAL.with(|global| {
+            let borrowed = global.borrow();
+            let (previous_app, choices, entry) = match *borrowed {
+                Some((ref previous_app, ref choices, _, ref entry)) => (
+                    previous_app, choices, entry),
+                None => panic!(),
+            };
 
-        if choices.contains(&current_text) {
+            let current_text = entry.get_text().unwrap_or(String::new());
+            debug!("Form activated with text {:?}", current_text);
+
+            if !choices.contains(&current_text) {
+                return;
+            }
+
             debug!("Entered text is a valid password store entry, continuing");
 
             entry.set_sensitive(false);
@@ -205,22 +242,69 @@ fn main() {
             // request password
             let next_app = previous_app.clone();
             thread::spawn(move || {
-                let password = get_password(&current_text);
+                let password = match get_password(&current_text) {
+                    Ok(p) => p,
+                    Err(error) =>{
+                        signal_error(error);
+                        return
+                    },
+                };
 
-                // restore focus for previous app
-                // window.hide();
-                focus_app(&next_app);
+                match focus_app(&next_app) {
+                    Ok(_) => {},
+                    Err(error) => {
+                        signal_error(error);
+                        return
+                    },
+                }
 
                 // auto type
-                auto_type(&password);
+                match auto_type(&password) {
+                    Ok(_) => {},
+                    Err(error) => {
+                        signal_error(error);
+                        return
+                    },
+                }
 
                 glib::idle_add(exit);
             });
 
-        }
+        });
+    });
+
+    GLOBAL.with(move |global| {
+        *global.borrow_mut() = Some((previous_app, choices, window, search_entry))
     });
 
     gtk::main();
+}
+
+// declare a new thread local storage key
+thread_local!(
+    static GLOBAL: RefCell<Option<(String, Vec<String>, gtk::Window, gtk::Entry)>> = RefCell::new(None)
+);
+
+fn signal_error(message: String) {
+    glib::idle_add(move || {
+        let dialog = MessageDialog::new(None::<&Window>,
+                                        DialogFlags::empty(),
+                                        MessageType::Error,
+                                        ButtonsType::Ok,
+                                        format!("{}{}", "Error:\n\n", message).as_str());
+        dialog.set_position(WindowPosition::Center);
+        dialog.run();
+        dialog.destroy();
+        GLOBAL.with(|global| {
+            let borrowed = global.borrow();
+            let entry = match *borrowed {
+                Some((_, _, _, ref entry)) => entry,
+                None => panic!(),
+            };
+            entry.set_sensitive(true);
+        });
+        glib::Continue(false)
+    });
 }
 
 fn exit() -> glib::Continue {
